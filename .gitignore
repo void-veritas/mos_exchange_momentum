@@ -24,5 +24,17 @@ ENV/
 *.xlsx
 *.json
 
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment variables
+.env
+.env.*
+
 # Logs
-*.log 
+*.log
+
+# Cache directory
+cache/ 

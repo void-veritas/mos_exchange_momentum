@@ -1,75 +1,127 @@
-# MOEX Index Constituents Tracker
+# Moscow Exchange Data API
 
-This tool asynchronously fetches and analyzes the constituent stocks of the Moscow Exchange (MOEX) Index over time. It provides historical composition data, FIGI codes, and time series analysis of index changes.
+A Python application for retrieving stock data from the Moscow Exchange and various other sources.
+
+## Project Overview
+
+This project provides tools for fetching, storing, and analyzing stock data from multiple sources including:
+
+- Moscow Exchange (MOEX)
+- Yahoo Finance
+- Tinkoff API
+- Financial Modeling Prep (FMP)
+- Finam
+- Investing.com
 
 ## Features
 
-- **Single Date Retrieval**: Fetch index constituents for any specific date
-- **Time Series Analysis**: Track index composition changes over a date range
-- **Membership Matrix**: Create a binary (0/1) matrix of stock membership in the index over time
-- **Constituent Changes**: Track additions, removals, and weight changes in the index
-- **SSL Handling**: Automatically bypass certificate verification issues with MOEX API
-- **Data Export**: Save results in CSV and Excel formats for further analysis
+- Fetch current MOEX index constituents
+- Track changes in index composition over time
+- Retrieve historical price data from multiple sources
+- Store data in MongoDB or CSV files
+- Analyze price movements and index changes
 
-## Usage
+## Project Structure
 
-### Installation
+The project follows a clean architecture approach with the following structure:
+
+```
+mos_exchange/
+├── src/                           # Source code
+│   ├── domain/                    # Domain layer (business logic)
+│   │   ├── entities/              # Business entities
+│   │   │   ├── __init__.py
+│   │   │   ├── price.py           # Price data entity
+│   │   │   ├── security.py        # Security/stock entity
+│   │   │   └── index.py           # Index composition entity
+│   │   ├── interfaces/            # Abstract repositories & services
+│   │   │   ├── __init__.py
+│   │   │   ├── price_repository.py
+│   │   │   └── data_source.py
+│   │   └── services/              # Business use cases
+│   │       ├── __init__.py
+│   │       ├── price_service.py
+│   │       └── index_service.py
+│   ├── infrastructure/            # External interfaces implementation
+│   │   ├── __init__.py
+│   │   ├── data_sources/          # Data source implementations
+│   │   │   ├── __init__.py
+│   │   │   ├── moex_api.py
+│   │   │   ├── yahoo_api.py
+│   │   │   ├── tinkoff_api.py
+│   │   │   └── finam_api.py
+│   │   ├── repositories/          # Repository implementations
+│   │   │   ├── __init__.py
+│   │   │   ├── mongodb_repository.py
+│   │   │   ├── sqlite_repository.py
+│   │   │   └── csv_repository.py
+│   │   └── utils/                 # Utility functions
+│   │       ├── __init__.py
+│   │       ├── date_utils.py
+│   │       └── error_handling.py
+│   └── application/               # Application layer
+│       ├── __init__.py
+│       ├── dto/                   # Data Transfer Objects
+│       │   ├── __init__.py
+│       │   └── price_dto.py
+│       ├── services/              # Application services
+│       │   ├── __init__.py
+│       │   ├── price_fetcher.py
+│       │   └── price_storage.py
+│       └── config.py              # Application configuration
+├── scripts/                       # Command-line scripts
+│   ├── fetch_prices.py
+│   └── fetch_index.py
+├── tests/                         # Unit tests
+│   ├── domain/
+│   ├── infrastructure/
+│   └── application/
+├── .gitignore
+├── requirements.txt
+└── README.md
+```
+
+## Clean Architecture Benefits
+
+This structure provides several benefits:
+
+1. **Separation of Concerns**: Each layer has a specific responsibility
+2. **Dependency Rule**: Dependencies flow inward, domain layer has no external dependencies
+3. **Testability**: Business logic is isolated and easily testable
+4. **Flexibility**: Data sources and storage mechanisms can be changed without affecting business logic
+
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Command Line Interface
+## Usage Examples
+
+Fetch current index composition:
 
 ```bash
-# Fetch current index constituents
-python main.py
-
-# Fetch index for a specific date
-python main.py 2023-01-15
-
-# Fetch time series data (past 6 months)
-python main.py timeseries
+python scripts/fetch_index.py
 ```
 
-### Output Files
+Fetch price data for specific tickers:
 
-- `moex_index_membership.csv`: Consolidated matrix of index membership (1=in index, 0=not in index)
-- `moex_index_membership.xlsx`: Excel version of the membership matrix
-- `moex_index_timeseries.csv`: Detailed data of all stocks across all dates
-- `moex_tickers.csv`: Lookup table for ticker symbols and company names
-- Individual date snapshots (e.g., `moex_index_2023-01-15.csv`)
-
-## Code Structure
-
-- `main.py`: Command-line interface and example usage
-- `moex_api.py`: Core functionality for fetching and processing MOEX data
-- `requirements.txt`: Project dependencies
-
-## Advanced Usage
-
-### Fetch Time Series with Different Frequencies
-
-```python
-timeseries_data = await fetch_moex_index_timeseries(
-    start_date="2022-01-01",
-    end_date="2023-01-01",
-    frequency="monthly",  # Options: "daily", "weekly", "monthly"
-    verify_ssl=False
-)
+```bash
+python scripts/fetch_prices.py --tickers SBER,GAZP,LKOH --source yahoo --start-date 2023-01-01
 ```
 
-### Analyze Index Changes
+## Data Sources
 
-```python
-changes = get_index_changes(timeseries_data)
-print(f"Total additions: {changes['summary']['total_additions']}")
-print(f"Total removals: {changes['summary']['total_removals']}")
-```
+The application can fetch data from:
 
-## Dependencies
+- **MOEX API**: Moscow Exchange official API for index compositions and price data
+- **Yahoo Finance**: Global price data source with good historical coverage
+- **Tinkoff API**: Russian broker API requiring authentication
+- **Finam**: Russian financial data provider
+- **Financial Modeling Prep**: Alternative global financial data API
+- **Investing.com**: Web-based financial data source
 
-- aiohttp: For async HTTP requests
-- pandas: For data processing and export
-- certifi: For SSL certificate handling
-- openpyxl: For Excel file export 
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request. 
+This project is licensed under the MIT License - see the LICENSE file for details. 
