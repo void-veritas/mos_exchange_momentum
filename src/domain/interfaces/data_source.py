@@ -5,6 +5,7 @@ from datetime import date, datetime
 from ..entities.price import Price
 from ..entities.security import Security
 from ..entities.index import Index
+from ..entities.corporate_event import CorporateEvent, EventType
 
 
 class DataSource(ABC):
@@ -54,6 +55,27 @@ class DataSource(ABC):
         """
         pass
     
+    async def fetch_corporate_events(self,
+                               tickers: List[str],
+                               event_types: Optional[List[EventType]] = None,
+                               start_date: Optional[Union[str, date]] = None,
+                               end_date: Optional[Union[str, date]] = None) -> Dict[str, List[CorporateEvent]]:
+        """
+        Fetch corporate events data for the specified tickers
+        
+        Args:
+            tickers: List of ticker symbols
+            event_types: Optional list of event types to filter by
+            start_date: Start date (inclusive)
+            end_date: End date (inclusive)
+            
+        Returns:
+            Dictionary mapping ticker symbols to lists of CorporateEvent objects
+        """
+        # Default implementation returns empty dict
+        # Subclasses should override if they support corporate events
+        return {ticker: [] for ticker in tickers}
+
 
 class IndexDataSource(ABC):
     """
