@@ -6,6 +6,7 @@ from typing import List, Dict, Optional, Any, Union
 from ...domain.interfaces.data_source import DataSource
 from ...domain.entities.price import Price
 from ...domain.entities.security import Security
+from ...domain.entities.corporate_event import CorporateEvent, EventType, DividendType
 from ...application.config import Config
 
 
@@ -195,4 +196,251 @@ class FMPDataSource(DataSource):
                     
         except Exception as e:
             logger.error(f"Error fetching security info for {ticker}: {e}")
-            return None 
+            return None
+    
+    async def fetch_corporate_events(self,
+                               tickers: List[str],
+                               event_types: Optional[List[EventType]] = None,
+                               start_date: Optional[Union[str, date]] = None,
+                               end_date: Optional[Union[str, date]] = None) -> Dict[str, List[CorporateEvent]]:
+        """
+        Fetch corporate events data for the specified tickers from FMP
+        
+        Args:
+            tickers: List of ticker symbols
+            event_types: Optional list of event types to filter by
+            start_date: Start date
+            end_date: End date
+            
+        Returns:
+            Dictionary mapping ticker symbols to lists of CorporateEvent objects
+        """
+        if not self.api_key:
+            logger.error("FMP API key not configured. Cannot fetch corporate events.")
+            return {ticker: [] for ticker in tickers}
+        
+        # Format dates
+        if end_date is None:
+            end_date_dt = datetime.now()
+            end_date_str = end_date_dt.strftime("%Y-%m-%d")
+        elif isinstance(end_date, date):
+            end_date_dt = datetime.combine(end_date, datetime.min.time())
+            end_date_str = end_date.isoformat()
+        else:
+            end_date_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            end_date_str = end_date
+            
+        if start_date is None:
+            # Default to 1 year ago
+            start_date_dt = end_date_dt - timedelta(days=365)
+            start_date_str = start_date_dt.strftime("%Y-%m-%d")
+        elif isinstance(start_date, date):
+            start_date_dt = datetime.combine(start_date, datetime.min.time())
+            start_date_str = start_date.isoformat()
+        else:
+            start_date_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            start_date_str = start_date
+        
+        result = {}
+        
+        # Determine which events to fetch based on event_types
+        fetch_dividends = not event_types or EventType.DIVIDEND in event_types
+        fetch_splits = not event_types or EventType.STOCK_SPLIT in event_types
+        
+        # Process each ticker
+        async with aiohttp.ClientSession() as session:
+            for ticker in tickers:
+                events = []
+                
+                # Fetch dividends if needed
+                if fetch_dividends:
+                    try:
+                        dividend_events = await self._fetch_dividends(
+                            ticker=ticker,
+                            session=session,
+                            start_date=start_date_str,
+                            end_date=end_date_str
+                        )
+                        events.extend(dividend_events)
+                    except Exception as e:
+                        logger.error(f"Error fetching dividend data for {ticker}: {e}")
+                
+                # Fetch stock splits if needed
+                if fetch_splits:
+                    try:
+                        split_events = await self._fetch_splits(
+                            ticker=ticker,
+                            session=session,
+                            start_date=start_date_str,
+                            end_date=end_date_str
+                        )
+                        events.extend(split_events)
+                    except Exception as e:
+                        logger.error(f"Error fetching split data for {ticker}: {e}")
+                
+                result[ticker] = events
+        
+        return result
+    
+    async def _fetch_dividends(self, 
+                         ticker: str, 
+                         session: aiohttp.ClientSession,
+                         start_date: str,
+                         end_date: str) -> List[CorporateEvent]:
+        """
+        Fetch dividend events for a specific ticker from FMP
+        
+        Args:
+            ticker: Ticker symbol
+            session: aiohttp session to use
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+            
+        Returns:
+            List of CorporateEvent objects
+        """
+        url = f"{self.BASE_URL}/historical-price-full/stock_dividend/{ticker}"
+        
+        params = {
+            "from": start_date,
+            "to": end_date,
+            "apikey": self.api_key
+        }
+        
+        try:
+            logger.info(f"Fetching dividend data for {ticker} from FMP")
+            async with session.get(url, params=params) as response:
+                if response.status != 200:
+                    logger.error(f"Error fetching FMP dividend data for {ticker}: {response.status}")
+                    return []
+                
+                # Parse the JSON response
+                data = await response.json()
+                
+                # Check if we have data
+                if "historical" not in data:
+                    logger.warning(f"No historical dividend data available for {ticker}")
+                    return []
+                
+                # Extract historical data
+                historical = data["historical"]
+                
+                # Create CorporateEvent objects
+                events = []
+                for item in historical:
+                    # Parse dates
+                    date_str = item.get("date")
+                    if not date_str:
+                        continue
+                    
+                    event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    
+                    # Get dividend information
+                    dividend = item.get("dividend")
+                    if dividend is None:
+                        continue
+                    
+                    # Create CorporateEvent object
+                    event = CorporateEvent(
+                        ticker=ticker,
+                        event_date=event_date,
+                        event_type=EventType.DIVIDEND,
+                        event_value=dividend,
+                        dividend_type=DividendType.REGULAR,  # Default to regular
+                        details=f"Dividend of {dividend} per share",
+                        source=self.name
+                    )
+                    
+                    events.append(event)
+                
+                logger.info(f"Fetched {len(events)} dividend events for {ticker} from FMP")
+                return events
+                
+        except Exception as e:
+            logger.error(f"Error fetching dividend data for {ticker} from FMP: {e}")
+            return []
+    
+    async def _fetch_splits(self, 
+                      ticker: str, 
+                      session: aiohttp.ClientSession,
+                      start_date: str,
+                      end_date: str) -> List[CorporateEvent]:
+        """
+        Fetch stock split events for a specific ticker from FMP
+        
+        Args:
+            ticker: Ticker symbol
+            session: aiohttp session to use
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+            
+        Returns:
+            List of CorporateEvent objects
+        """
+        url = f"{self.BASE_URL}/historical-price-full/stock_split/{ticker}"
+        
+        params = {
+            "from": start_date,
+            "to": end_date,
+            "apikey": self.api_key
+        }
+        
+        try:
+            logger.info(f"Fetching stock split data for {ticker} from FMP")
+            async with session.get(url, params=params) as response:
+                if response.status != 200:
+                    logger.error(f"Error fetching FMP stock split data for {ticker}: {response.status}")
+                    return []
+                
+                # Parse the JSON response
+                data = await response.json()
+                
+                # Check if we have data
+                if "historical" not in data:
+                    logger.warning(f"No historical stock split data available for {ticker}")
+                    return []
+                
+                # Extract historical data
+                historical = data["historical"]
+                
+                # Create CorporateEvent objects
+                events = []
+                for item in historical:
+                    # Parse dates
+                    date_str = item.get("date")
+                    if not date_str:
+                        continue
+                    
+                    event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    
+                    # Get split information
+                    split_text = item.get("label")
+                    if not split_text:
+                        continue
+                    
+                    # Parse split ratio (e.g., "2:1" -> 2.0)
+                    try:
+                        numerator, denominator = split_text.split(":")
+                        split_ratio = float(numerator) / float(denominator)
+                    except (ValueError, ZeroDivisionError):
+                        logger.warning(f"Could not parse split ratio from '{split_text}' for {ticker}")
+                        continue
+                    
+                    # Create CorporateEvent object
+                    event = CorporateEvent(
+                        ticker=ticker,
+                        event_date=event_date,
+                        event_type=EventType.STOCK_SPLIT,
+                        event_value=split_ratio,
+                        details=f"Stock split {split_text}",
+                        source=self.name
+                    )
+                    
+                    events.append(event)
+                
+                logger.info(f"Fetched {len(events)} stock split events for {ticker} from FMP")
+                return events
+                
+        except Exception as e:
+            logger.error(f"Error fetching stock split data for {ticker} from FMP: {e}")
+            return [] 

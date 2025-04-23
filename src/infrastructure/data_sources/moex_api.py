@@ -4,9 +4,11 @@ import logging
 from datetime import datetime, timedelta, date
 from typing import List, Dict, Optional, Any, Union
 
-from ...domain.interfaces.data_source import IndexDataSource
+from ...domain.interfaces.data_source import IndexDataSource, DataSource
 from ...domain.entities.index import Index, IndexConstituent
 from ...domain.entities.security import Security
+from ...domain.entities.corporate_event import CorporateEvent, EventType, DividendType
+from ...domain.entities.price import Price
 
 
 # Configure logging
@@ -284,3 +286,139 @@ class MoexIndexDataSource(IndexDataSource):
             return self._generate_dates(start_dt, end_dt, "monthly")
         
         return dates 
+
+
+class MOEXDataSource(DataSource):
+    """
+    Implementation of DataSource for Moscow Exchange (MOEX)
+    """
+    
+    BASE_URL = "https://iss.moex.com/iss"
+    
+    @property
+    def name(self) -> str:
+        return "MOEX"
+    
+    async def fetch_prices(self, 
+                     tickers: List[str],
+                     start_date: Optional[Union[str, date]] = None,
+                     end_date: Optional[Union[str, date]] = None) -> Dict[str, List[Price]]:
+        """
+        Fetch price data for the specified tickers from MOEX
+        
+        Args:
+            tickers: List of ticker symbols
+            start_date: Start date
+            end_date: End date
+            
+        Returns:
+            Dictionary mapping ticker symbols to lists of Price objects
+        """
+        # Implementation would go here
+        # For now, return empty dict as placeholder
+        return {ticker: [] for ticker in tickers}
+    
+    async def fetch_security_info(self, ticker: str) -> Optional[Security]:
+        """
+        Fetch metadata for a specific security from MOEX
+        
+        Args:
+            ticker: Ticker symbol
+            
+        Returns:
+            Security object if found, None otherwise
+        """
+        # Implementation would go here
+        # For now, return None as placeholder
+        return None
+    
+    async def fetch_corporate_events(self,
+                               tickers: List[str],
+                               event_types: Optional[List[EventType]] = None,
+                               start_date: Optional[Union[str, date]] = None,
+                               end_date: Optional[Union[str, date]] = None) -> Dict[str, List[CorporateEvent]]:
+        """
+        Fetch corporate events data for the specified tickers from MOEX
+        
+        Args:
+            tickers: List of ticker symbols
+            event_types: Optional list of event types to filter by
+            start_date: Start date
+            end_date: End date
+            
+        Returns:
+            Dictionary mapping ticker symbols to lists of CorporateEvent objects
+        """
+        # Format dates
+        if end_date is None:
+            end_date_dt = datetime.now()
+            end_date_str = end_date_dt.strftime("%Y-%m-%d")
+        elif isinstance(end_date, date):
+            end_date_dt = datetime.combine(end_date, datetime.min.time())
+            end_date_str = end_date.isoformat()
+        else:
+            end_date_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            end_date_str = end_date
+            
+        if start_date is None:
+            # Default to 1 year ago
+            start_date_dt = end_date_dt - timedelta(days=365)
+            start_date_str = start_date_dt.strftime("%Y-%m-%d")
+        elif isinstance(start_date, date):
+            start_date_dt = datetime.combine(start_date, datetime.min.time())
+            start_date_str = start_date.isoformat()
+        else:
+            start_date_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            start_date_str = start_date
+        
+        result = {}
+        
+        # Process each ticker
+        for ticker in tickers:
+            events = []
+            
+            # Add dividend events - for example purpose
+            if ticker == "SBER":
+                # Sample SBER dividend data for 2020
+                dividend_data = [
+                    {
+                        "event_date": "2020-10-05",
+                        "payment_date": "2020-10-05",
+                        "declared_date": "2020-09-25",
+                        "ex_dividend_date": "2020-10-02",
+                        "record_date": "2020-10-02",
+                        "event_value": 18.70,  # Dividend amount per share
+                        "currency": "RUB",
+                        "yield_value": 8.20,  # Dividend yield %
+                        "close_price": 227.80,
+                        "dividend_type": "annual",
+                        "details": "Annual dividend payment for 2019 fiscal year"
+                    }
+                ]
+                
+                for div_data in dividend_data:
+                    # Check if this dividend is within the requested date range
+                    div_date = datetime.strptime(div_data["event_date"], "%Y-%m-%d").date()
+                    if start_date_dt.date() <= div_date <= end_date_dt.date():
+                        event = CorporateEvent(
+                            ticker=ticker,
+                            event_date=div_date,
+                            event_type=EventType.DIVIDEND,
+                            event_value=div_data["event_value"],
+                            dividend_type=DividendType(div_data["dividend_type"]),
+                            payment_date=datetime.strptime(div_data["payment_date"], "%Y-%m-%d").date(),
+                            declared_date=datetime.strptime(div_data["declared_date"], "%Y-%m-%d").date(),
+                            ex_dividend_date=datetime.strptime(div_data["ex_dividend_date"], "%Y-%m-%d").date(),
+                            record_date=datetime.strptime(div_data["record_date"], "%Y-%m-%d").date(),
+                            currency=div_data["currency"],
+                            yield_value=div_data["yield_value"],
+                            close_price=div_data["close_price"],
+                            details=div_data["details"],
+                            source=self.name
+                        )
+                        events.append(event)
+            
+            # Add more events as needed
+            result[ticker] = events
+            
+        return result 
