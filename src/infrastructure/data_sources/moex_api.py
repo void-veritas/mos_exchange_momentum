@@ -373,52 +373,258 @@ class MOEXDataSource(DataSource):
         
         result = {}
         
+        # Get sample data for different tickers
+        sample_data = self._get_sample_corporate_events()
+        
         # Process each ticker
         for ticker in tickers:
             events = []
             
-            # Add dividend events - for example purpose
-            if ticker == "SBER":
-                # Sample SBER dividend data for 2020
-                dividend_data = [
-                    {
-                        "event_date": "2020-10-05",
-                        "payment_date": "2020-10-05",
-                        "declared_date": "2020-09-25",
-                        "ex_dividend_date": "2020-10-02",
-                        "record_date": "2020-10-02",
-                        "event_value": 18.70,  # Dividend amount per share
-                        "currency": "RUB",
-                        "yield_value": 8.20,  # Dividend yield %
-                        "close_price": 227.80,
-                        "dividend_type": "annual",
-                        "details": "Annual dividend payment for 2019 fiscal year"
-                    }
-                ]
+            # Check if we have sample data for this ticker
+            if ticker in sample_data:
+                ticker_events = sample_data[ticker]
                 
-                for div_data in dividend_data:
-                    # Check if this dividend is within the requested date range
-                    div_date = datetime.strptime(div_data["event_date"], "%Y-%m-%d").date()
-                    if start_date_dt.date() <= div_date <= end_date_dt.date():
-                        event = CorporateEvent(
-                            ticker=ticker,
-                            event_date=div_date,
-                            event_type=EventType.DIVIDEND,
-                            event_value=div_data["event_value"],
-                            dividend_type=DividendType(div_data["dividend_type"]),
-                            payment_date=datetime.strptime(div_data["payment_date"], "%Y-%m-%d").date(),
-                            declared_date=datetime.strptime(div_data["declared_date"], "%Y-%m-%d").date(),
-                            ex_dividend_date=datetime.strptime(div_data["ex_dividend_date"], "%Y-%m-%d").date(),
-                            record_date=datetime.strptime(div_data["record_date"], "%Y-%m-%d").date(),
-                            currency=div_data["currency"],
-                            yield_value=div_data["yield_value"],
-                            close_price=div_data["close_price"],
-                            details=div_data["details"],
-                            source=self.name
-                        )
+                # Filter by event type if needed
+                if event_types:
+                    ticker_events = [e for e in ticker_events if e["event_type"] in [et.value for et in event_types]]
+                
+                # Filter by date range
+                for event_data in ticker_events:
+                    event_date = datetime.strptime(event_data["event_date"], "%Y-%m-%d").date()
+                    
+                    # Check if event is within date range
+                    if start_date_dt.date() <= event_date <= end_date_dt.date():
+                        # Create event based on type
+                        event_type = event_data["event_type"]
+                        
+                        if event_type == "dividend":
+                            event = self._create_dividend_event(ticker, event_data)
+                        elif event_type == "stock_split":
+                            event = self._create_split_event(ticker, event_data)
+                        elif event_type in ["merger", "acquisition"]:
+                            event = self._create_ma_event(ticker, event_data)
+                        elif event_type == "ticker_change":
+                            event = self._create_ticker_change_event(ticker, event_data)
+                        else:
+                            # Generic event
+                            event = CorporateEvent(
+                                ticker=ticker,
+                                event_date=event_date,
+                                event_type=EventType(event_type),
+                                event_value=event_data.get("event_value"),
+                                details=event_data.get("details"),
+                                source=self.name
+                            )
+                        
                         events.append(event)
             
-            # Add more events as needed
+            # Add events to result
             result[ticker] = events
             
-        return result 
+        return result
+    
+    def _get_sample_corporate_events(self) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get sample corporate events data for testing
+        
+        Returns:
+            Dictionary with sample events data
+        """
+        return {
+            "SBER": [
+                # Dividend
+                {
+                    "event_date": "2020-10-05",
+                    "event_type": "dividend",
+                    "event_value": 18.70,
+                    "payment_date": "2020-10-05",
+                    "declared_date": "2020-09-25",
+                    "ex_dividend_date": "2020-10-02",
+                    "record_date": "2020-10-02",
+                    "currency": "RUB",
+                    "yield_value": 8.20,
+                    "close_price": 227.80,
+                    "dividend_type": "annual",
+                    "details": "Annual dividend payment for 2019 fiscal year"
+                },
+                # Earlier dividend
+                {
+                    "event_date": "2020-04-12",
+                    "event_type": "dividend",
+                    "event_value": 5.20,
+                    "payment_date": "2020-04-20",
+                    "declared_date": "2020-03-30",
+                    "ex_dividend_date": "2020-04-12",
+                    "record_date": "2020-04-14",
+                    "currency": "RUB",
+                    "yield_value": 2.30,
+                    "close_price": 226.10,
+                    "dividend_type": "interim",
+                    "details": "Interim dividend payment for H2 2019"
+                },
+                # Name change (hypothetical for example)
+                {
+                    "event_date": "2020-05-01",
+                    "event_type": "name_change",
+                    "details": "Changed legal name from 'Sberbank of Russia' to 'Sberbank'",
+                    "old_name": "Sberbank of Russia",
+                    "new_name": "Sberbank"
+                }
+            ],
+            "GAZP": [
+                # Dividend
+                {
+                    "event_date": "2020-07-20",
+                    "event_type": "dividend",
+                    "event_value": 15.24,
+                    "payment_date": "2020-07-20",
+                    "declared_date": "2020-06-26",
+                    "ex_dividend_date": "2020-07-17",
+                    "record_date": "2020-07-17",
+                    "currency": "RUB",
+                    "yield_value": 6.40,
+                    "close_price": 237.50,
+                    "dividend_type": "annual",
+                    "details": "Annual dividend payment for 2019 fiscal year"
+                }
+            ],
+            "YNDX": [
+                # Merger (hypothetical example)
+                {
+                    "event_date": "2020-12-10",
+                    "event_type": "merger",
+                    "details": "[HYPOTHETICAL] Merged with Taxi division to create new unified transportation platform",
+                    "partner": "Yandex.Taxi",
+                    "merger_ratio": 1.0,
+                    "announcement_date": "2020-11-01"
+                }
+            ],
+            "MGNT": [
+                # Stock Split (hypothetical example)
+                {
+                    "event_date": "2020-03-08",
+                    "event_type": "stock_split",
+                    "event_value": 5.0,  # 5-for-1 split
+                    "details": "[HYPOTHETICAL] 5-for-1 stock split to increase liquidity and accessibility",
+                    "announcement_date": "2020-02-10",
+                    "effective_date": "2020-03-08"
+                },
+                # Ticker change (hypothetical example)
+                {
+                    "event_date": "2020-09-01",
+                    "event_type": "ticker_change",
+                    "old_ticker": "MGNT",
+                    "new_ticker": "MGNT1",
+                    "details": "[HYPOTHETICAL] Ticker symbol changed due to corporate restructuring",
+                    "effective_date": "2020-09-01"
+                }
+            ]
+        }
+    
+    def _create_dividend_event(self, ticker: str, data: Dict[str, Any]) -> CorporateEvent:
+        """
+        Create a dividend event from data
+        
+        Args:
+            ticker: Ticker symbol
+            data: Dividend event data
+            
+        Returns:
+            CorporateEvent object
+        """
+        return CorporateEvent(
+            ticker=ticker,
+            event_date=datetime.strptime(data["event_date"], "%Y-%m-%d").date(),
+            event_type=EventType.DIVIDEND,
+            event_value=data["event_value"],
+            dividend_type=DividendType(data["dividend_type"]),
+            payment_date=datetime.strptime(data["payment_date"], "%Y-%m-%d").date(),
+            declared_date=datetime.strptime(data["declared_date"], "%Y-%m-%d").date(),
+            ex_dividend_date=datetime.strptime(data["ex_dividend_date"], "%Y-%m-%d").date(),
+            record_date=datetime.strptime(data["record_date"], "%Y-%m-%d").date(),
+            currency=data["currency"],
+            yield_value=data["yield_value"],
+            close_price=data["close_price"],
+            details=data["details"],
+            source=self.name
+        )
+    
+    def _create_split_event(self, ticker: str, data: Dict[str, Any]) -> CorporateEvent:
+        """
+        Create a stock split event from data
+        
+        Args:
+            ticker: Ticker symbol
+            data: Stock split event data
+            
+        Returns:
+            CorporateEvent object
+        """
+        event = CorporateEvent(
+            ticker=ticker,
+            event_date=datetime.strptime(data["event_date"], "%Y-%m-%d").date(),
+            event_type=EventType.STOCK_SPLIT,
+            event_value=data["event_value"],
+            details=data["details"],
+            source=self.name
+        )
+        
+        # Add additional fields if present
+        if "announcement_date" in data:
+            event.announcement_date = datetime.strptime(data["announcement_date"], "%Y-%m-%d").date()
+        if "effective_date" in data:
+            event.effective_date = datetime.strptime(data["effective_date"], "%Y-%m-%d").date()
+            
+        return event
+    
+    def _create_ma_event(self, ticker: str, data: Dict[str, Any]) -> CorporateEvent:
+        """
+        Create a merger or acquisition event from data
+        
+        Args:
+            ticker: Ticker symbol
+            data: M&A event data
+            
+        Returns:
+            CorporateEvent object
+        """
+        event = CorporateEvent(
+            ticker=ticker,
+            event_date=datetime.strptime(data["event_date"], "%Y-%m-%d").date(),
+            event_type=EventType(data["event_type"]),
+            details=data["details"],
+            source=self.name
+        )
+        
+        # Add additional fields to additional_properties
+        for key, value in data.items():
+            if key not in ["event_date", "event_type", "details"]:
+                event.additional_properties[key] = value
+                
+        return event
+    
+    def _create_ticker_change_event(self, ticker: str, data: Dict[str, Any]) -> CorporateEvent:
+        """
+        Create a ticker change event from data
+        
+        Args:
+            ticker: Ticker symbol
+            data: Ticker change event data
+            
+        Returns:
+            CorporateEvent object
+        """
+        event = CorporateEvent(
+            ticker=ticker,
+            event_date=datetime.strptime(data["event_date"], "%Y-%m-%d").date(),
+            event_type=EventType.TICKER_CHANGE,
+            details=data["details"],
+            source=self.name
+        )
+        
+        # Add additional fields to additional_properties
+        for key, value in data.items():
+            if key not in ["event_date", "event_type", "details"]:
+                event.additional_properties[key] = value
+                
+        return event 
