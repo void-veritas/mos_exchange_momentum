@@ -1,37 +1,52 @@
-# Byte-compiled / optimized / DLL files
+# Python cache files
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
-
-# Virtual environments
-venv/
+*.so
+.Python
 env/
-ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# IDE specific files
+# IDE files
 .idea/
 .vscode/
 *.swp
 *.swo
 
 # Generated data files
+data/
 *.csv
 *.xlsx
 *.json
+*.png
+
+# Environment
+.env
+.venv
+venv/
+ENV/
+
+# OS specific
+.DS_Store
+Thumbs.db
 
 # Database files
 *.db
 *.sqlite
 *.sqlite3
-
-# Environment variables
-.env
-.env.*
 
 # Logs
 *.log

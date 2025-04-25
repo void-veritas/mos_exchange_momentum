@@ -47,7 +47,8 @@ class PriceService:
             end_date = date.fromisoformat(end_date)
             
         if start_date is None:
-            start_date = end_date - timedelta(days=30)
+            # Default to 1 year ago
+            start_date = end_date - timedelta(days=365)
         elif isinstance(start_date, str):
             start_date = date.fromisoformat(start_date)
         
@@ -60,10 +61,21 @@ class PriceService:
                 end_date=end_date
             )
             
-            # Check if we have complete data for all tickers
+            # Check if we have complete data for all tickers and all dates
             complete = True
             for ticker in tickers:
                 if ticker not in existing_data or not existing_data[ticker]:
+                    complete = False
+                    break
+                    
+                # Check if we have data for all dates in the range
+                ticker_dates = set(price.date for price in existing_data[ticker])
+                days_in_range = (end_date - start_date).days + 1
+                
+                # We consider it complete if we have at least 70% of trading days
+                # (accounting for weekends and holidays)
+                trading_days_estimate = days_in_range * 5 // 7  # Rough estimate of trading days
+                if len(ticker_dates) < trading_days_estimate * 0.7:
                     complete = False
                     break
             
@@ -76,64 +88,101 @@ class PriceService:
         # Try each data source in order until we get data for all tickers
         missing_tickers = [ticker for ticker in tickers if ticker not in result or not result[ticker]]
         
-        if missing_tickers:
-            for source in self.data_sources:
-                if not missing_tickers:
-                    break
-                    
-                try:
-                    new_data = await source.fetch_prices(
-                        tickers=missing_tickers,
-                        start_date=start_date,
-                        end_date=end_date
-                    )
-                    
-                    # Store the fetched data
-                    all_prices = []
-                    for ticker, prices in new_data.items():
-                        if prices:
-                            # Add to result
-                            if ticker not in result:
-                                result[ticker] = prices
-                            else:
-                                # Merge with existing data
-                                existing_dates = {p.date.isoformat() if isinstance(p.date, date) else p.date: i 
-                                               for i, p in enumerate(result[ticker])}
-                                
-                                for price in prices:
-                                    price_date = price.date.isoformat() if isinstance(price.date, date) else price.date
-                                    if price_date not in existing_dates:
-                                        result[ticker].append(price)
-                            
-                            # Add to list for storing in repository
-                            all_prices.extend(prices)
-                            
-                            # Remove ticker from missing list
-                            if ticker in missing_tickers:
-                                missing_tickers.remove(ticker)
-                    
-                    # Store in repository
-                    if all_prices:
-                        await self.repository.store_prices(all_prices)
+        for source in self.data_sources:
+            if not missing_tickers:
+                break
+                
+            try:
+                # Fetch from data source
+                fetched_data = await source.fetch_prices(
+                    tickers=missing_tickers,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                
+                # Store in result
+                for ticker, prices in fetched_data.items():
+                    if prices:
+                        # Save to repository
+                        await self.repository.store_prices(prices)
                         
-                except Exception as e:
-                    # Log error and continue with next source
-                    print(f"Error fetching from {source.name}: {e}")
-                    continue
+                        # Add to result
+                        if ticker not in result:
+                            result[ticker] = []
+                        result[ticker].extend(prices)
+                
+                # Update missing tickers
+                missing_tickers = [ticker for ticker in missing_tickers 
+                                  if ticker not in fetched_data or not fetched_data[ticker]]
+                
+            except Exception as e:
+                # Log error and continue with next source
+                print(f"Error fetching from {source.name}: {e}")
+                continue
         
         return result
     
-    async def get_latest_prices(self, tickers: List[str]) -> Dict[str, Price]:
+    async def get_latest_prices(self,
+                          tickers: List[str],
+                          force_refresh: bool = False) -> Dict[str, Optional[Price]]:
         """
-        Get the latest price for each ticker
+        Get the latest price for each of the specified tickers
         
         Args:
             tickers: List of ticker symbols
+            force_refresh: Whether to force fetching from data sources
             
         Returns:
-            Dictionary mapping ticker symbols to their latest Price object
+            Dictionary mapping ticker symbols to the latest Price object, or None if not found
         """
-        return await self.repository.get_latest_prices(tickers)
+        # Try to get existing data from repository first, unless force_refresh is True
+        result = {}
+        if not force_refresh:
+            existing_data = await self.repository.get_latest_prices(tickers)
+            
+            # Check if we have data for all tickers
+            complete = True
+            for ticker in tickers:
+                if ticker not in existing_data or existing_data[ticker] is None:
+                    complete = False
+                    break
+                    
+                # Check if the data is recent enough (no older than 1 day for daily data)
+                if existing_data[ticker].date < date.today() - timedelta(days=1):
+                    complete = False
+                    break
+            
+            if complete:
+                return existing_data
+            
+            # Store what we already have
+            result = existing_data
+        
+        # Try each data source in order until we get data for all tickers
+        missing_tickers = [ticker for ticker in tickers if ticker not in result or result[ticker] is None]
+        
+        if missing_tickers:
+            # Get all prices for today and yesterday to ensure we get the latest
+            end_date = date.today()
+            start_date = end_date - timedelta(days=1)
+            
+            fetched_all = await self.get_prices(
+                tickers=missing_tickers,
+                start_date=start_date,
+                end_date=end_date,
+                force_refresh=True
+            )
+            
+            # Get the latest price for each ticker
+            for ticker, prices in fetched_all.items():
+                if prices:
+                    # Sort by date (newest first)
+                    latest_prices = sorted(prices, key=lambda x: x.date, reverse=True)
+                    result[ticker] = latest_prices[0]
+                else:
+                    result[ticker] = None
+        
+        return result
     
     async def calculate_returns(self, 
                          ticker: str,
