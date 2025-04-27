@@ -52,4 +52,7 @@ Thumbs.db
 *.log
 
 # Cache directory
-cache/ 
+cache/
+
+# Russian named practice files
+практика_*.py 
