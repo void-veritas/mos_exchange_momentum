@@ -1,7 +1,12 @@
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Tuple
 import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
 class Portfolio:
@@ -135,6 +140,15 @@ class Portfolio:
             metrics['momentum'] = (end_prices / start_prices) - 1
         else:
             metrics['momentum'] = metrics['total_return']  # Use total return if not enough history
+        
+        # Calculate CVaR (Conditional Value at Risk)
+        confidence_level = 0.95
+        for asset in returns.columns:
+            asset_returns = returns[asset]
+            sorted_returns = asset_returns.sort_values()
+            cutoff_index = int(np.ceil(len(sorted_returns) * (1 - confidence_level)))
+            cvar = sorted_returns[:cutoff_index].mean()
+            metrics.loc[asset, 'cvar'] = cvar
             
         # Group by factors if available
         if self.factors is not None:
@@ -146,14 +160,15 @@ class Portfolio:
                 'drawdown': 'max_drawdown',  # Note: for drawdown, higher (less negative) is better
                 'momentum': 'momentum',
                 'sortino': 'sortino_ratio',
-                'calmar': 'calmar_ratio'
+                'calmar': 'calmar_ratio',
+                'cvar': 'cvar'  # Add CVaR to the map
             }
             
             # Get the column to sort by
             sort_by = metric_map.get(self.select_metric, 'sharpe_ratio')
             
             # Handle metrics where lower is better
-            ascending = sort_by in ['volatility', 'max_drawdown']
+            ascending = sort_by in ['volatility', 'max_drawdown', 'cvar']
             
             # Merge metrics with factors
             merged_metrics = metrics.join(self.factors)
@@ -183,12 +198,38 @@ class Portfolio:
         # If no factors available, select top performing assets by the metric
         sorted_metrics = metrics.sort_values(
             by=metric_map.get(self.select_metric, 'sharpe_ratio'), 
-            ascending=sort_by in ['volatility', 'max_drawdown']
+            ascending=sort_by in ['volatility', 'max_drawdown', 'cvar']
         )
         
         # Select top N assets (up to 10)
         top_n = min(10, len(sorted_metrics))
         return sorted_metrics.head(top_n).index.tolist()
+    
+    def _calculate_cvar(self, returns: pd.DataFrame, confidence_level: float = 0.95) -> pd.Series:
+        """
+        Calculate Conditional Value at Risk (CVaR) for each asset.
+        
+        Args:
+            returns: DataFrame with return history
+            confidence_level: Confidence level for CVaR calculation (default: 0.95)
+            
+        Returns:
+            Series with CVaR values for each asset
+        """
+        cvar_values = pd.Series(index=returns.columns)
+        
+        for asset in returns.columns:
+            asset_returns = returns[asset].dropna()
+            if len(asset_returns) > 0:
+                sorted_returns = asset_returns.sort_values()
+                cutoff_index = int(np.ceil(len(sorted_returns) * (1 - confidence_level)))
+                if cutoff_index > 0:
+                    cvar = sorted_returns[:cutoff_index].mean()
+                    cvar_values[asset] = cvar
+                else:
+                    cvar_values[asset] = asset_returns.min()
+        
+        return cvar_values
     
     def allocate(
         self,
@@ -203,8 +244,9 @@ class Portfolio:
         Args:
             prices: DataFrame with price history
             assets: List of assets to allocate weights to
-            method: Allocation method ("optimize" for minimum variance, "equal" for equal weight)
-            target_metric: Metric to optimize ("variance", "sharpe", "return")
+            method: Allocation method ("optimize" for minimum variance, "equal" for equal weight,
+                    "inverse_vol" for inverse volatility, "cvar" for inverse CVaR)
+            target_metric: Metric to optimize ("variance", "sharpe", "return", "cvar_ratio")
             
         Returns:
             Series with asset weights
@@ -227,6 +269,24 @@ class Portfolio:
             return pd.Series()
         
         returns = prices.pct_change().dropna()
+        
+        # Inverse volatility allocation
+        if method == "inverse_vol":
+            vols = returns.std()
+            inv_vols = 1.0 / vols
+            weights = inv_vols / inv_vols.sum()
+            self.weights = weights.to_dict()
+            return weights
+        
+        # Inverse CVaR allocation
+        if method == "cvar":
+            cvar_values = self._calculate_cvar(returns)
+            # Convert CVaR to positive values for weighting
+            abs_cvar = cvar_values.abs()
+            inv_cvar = 1.0 / abs_cvar
+            weights = inv_cvar / inv_cvar.sum()
+            self.weights = weights.to_dict()
+            return weights
         
         # Calculate covariance matrix
         cov_matrix = returns.cov()
@@ -253,6 +313,28 @@ class Portfolio:
             def _target(x: np.ndarray) -> float:
                 portfolio_return = np.sum(returns.mean() * x) * 252
                 return -portfolio_return  # Negative because we're minimizing
+        elif target_metric == "cvar_ratio":
+            # Maximize return to CVaR ratio (negative because we're minimizing)
+            def _target(x: np.ndarray) -> float:
+                # Calculate portfolio return
+                portfolio_return = np.sum(returns.mean() * x) * 252
+                
+                # Calculate portfolio CVaR
+                portfolio_returns = returns.dot(x)
+                sorted_returns = portfolio_returns.sort_values()
+                confidence_level = 0.95
+                cutoff_index = int(np.ceil(len(sorted_returns) * (1 - confidence_level)))
+                if cutoff_index > 0:
+                    portfolio_cvar = sorted_returns[:cutoff_index].mean()
+                    if portfolio_cvar < 0:  # Ensure CVaR is negative for ratio calculation
+                        cvar_ratio = portfolio_return / abs(portfolio_cvar)
+                        return -cvar_ratio  # Negative because we're minimizing
+                
+                # Fallback to sharpe ratio if CVaR calculation fails
+                portfolio_variance = np.dot(x.T, np.dot(cov_matrix, x)) * 252
+                portfolio_volatility = np.sqrt(portfolio_variance)
+                sharpe_ratio = portfolio_return / portfolio_volatility
+                return -sharpe_ratio
         else:
             # Default to minimum variance
             def _target(x: np.ndarray) -> float:
@@ -308,13 +390,14 @@ class Portfolio:
         """Get the current portfolio weights."""
         return self.weights
     
-    def rebalance(self, prices: pd.DataFrame, method: str = "optimize") -> pd.Series:
+    def rebalance(self, prices: pd.DataFrame, method: str = "optimize", target_metric: str = "variance") -> pd.Series:
         """
         Rebalance the portfolio based on current prices.
         
         Args:
             prices: DataFrame with current price data
             method: Allocation method
+            target_metric: Metric to optimize
             
         Returns:
             Series with updated asset weights
@@ -323,4 +406,267 @@ class Portfolio:
         selected_assets = self.select(prices)
         
         # Allocate weights
-        return self.allocate(prices, selected_assets, method=method) 
+        return self.allocate(prices, selected_assets, method=method, target_metric=target_metric)
+    
+    def calculate_rebalance_orders(
+        self,
+        current_positions: pd.DataFrame,
+        prices: pd.DataFrame,
+        cash: float = 0,
+        method: str = "optimize",
+        target_metric: str = "variance",
+        threshold: float = 0.05
+    ) -> Tuple[pd.DataFrame, pd.Series]:
+        """
+        Calculate rebalance orders to reach target weights.
+        
+        Args:
+            current_positions: DataFrame with current positions (tickers, quantities, values)
+            prices: DataFrame with current price data
+            cash: Available cash
+            method: Weight allocation method
+            target_metric: Metric to optimize for weight allocation
+            threshold: Minimum deviation threshold to trigger rebalancing (default: 5%)
+            
+        Returns:
+            Tuple of (orders DataFrame, target weights Series)
+        """
+        logger.info("Calculating rebalance orders")
+        
+        # Calculate current portfolio value
+        if 'market_value' in current_positions.columns:
+            portfolio_value = current_positions['market_value'].sum() + cash
+        elif 'current_price' in current_positions.columns and 'quantity' in current_positions.columns:
+            current_positions['market_value'] = current_positions['quantity'] * current_positions['current_price']
+            portfolio_value = current_positions['market_value'].sum() + cash
+        else:
+            raise ValueError("Current positions must contain market_value or both quantity and current_price")
+        
+        logger.info(f"Current portfolio value: {portfolio_value:.2f}")
+        
+        # Calculate current weights
+        if portfolio_value > 0:
+            current_positions['weight'] = current_positions['market_value'] / portfolio_value
+        else:
+            current_positions['weight'] = 0
+        
+        # Get target weights
+        selected_assets = self.select(prices)
+        target_weights = self.allocate(prices, selected_assets, method=method, target_metric=target_metric)
+        
+        # Merge current positions with target weights
+        all_assets = set(current_positions.index) | set(target_weights.index)
+        rebalance_df = pd.DataFrame(index=all_assets)
+        
+        # Add current positions
+        rebalance_df['current_quantity'] = current_positions.get('quantity', pd.Series(0, index=all_assets))
+        rebalance_df['current_price'] = current_positions.get('current_price', pd.Series(0, index=all_assets))
+        rebalance_df['current_value'] = current_positions.get('market_value', pd.Series(0, index=all_assets))
+        rebalance_df['current_weight'] = current_positions.get('weight', pd.Series(0, index=all_assets))
+        
+        # Add target weights and fill NaN values
+        rebalance_df['target_weight'] = target_weights
+        rebalance_df = rebalance_df.fillna(0)
+        
+        # Calculate target values and differences
+        rebalance_df['target_value'] = rebalance_df['target_weight'] * portfolio_value
+        rebalance_df['value_difference'] = rebalance_df['target_value'] - rebalance_df['current_value']
+        rebalance_df['weight_difference'] = rebalance_df['target_weight'] - rebalance_df['current_weight']
+        
+        # Filter based on threshold
+        rebalance_df['needs_rebalance'] = abs(rebalance_df['weight_difference']) > threshold
+        
+        # Calculate lots to trade if lot size information is available
+        if 'lot' in current_positions.columns:
+            rebalance_df['lot'] = current_positions.get('lot', pd.Series(1, index=all_assets)).fillna(1)
+            rebalance_df['order_quantity'] = (rebalance_df['value_difference'] / rebalance_df['current_price'] / rebalance_df['lot']).round().astype(int) * rebalance_df['lot']
+        else:
+            # Assume lot size of 1 if not provided
+            rebalance_df['order_quantity'] = (rebalance_df['value_difference'] / rebalance_df['current_price']).round().astype(int)
+        
+        # Create orders DataFrame with necessary information
+        orders = rebalance_df[rebalance_df['needs_rebalance']].copy()
+        orders['is_buy'] = orders['order_quantity'] > 0
+        orders['order_value'] = orders['order_quantity'] * orders['current_price']
+        
+        # Sort by absolute order value
+        orders = orders.sort_values(by='order_value', ascending=False)
+        
+        logger.info(f"Generated {len(orders)} rebalance orders")
+        
+        return orders, target_weights
+    
+    def get_mean_absolute_percentage_error(self, current_weights: pd.Series, target_weights: pd.Series) -> float:
+        """
+        Calculate Mean Absolute Percentage Error between current and target weights.
+        
+        Args:
+            current_weights: Series with current portfolio weights
+            target_weights: Series with target portfolio weights
+            
+        Returns:
+            MAPE value
+        """
+        # Align the weights to have the same indices
+        combined = pd.concat([current_weights, target_weights], axis=1).fillna(0)
+        current = combined[0].values
+        target = combined[1].values
+        
+        # Avoid division by zero
+        epsilon = np.finfo(np.float64).eps
+        
+        # Calculate MAPE
+        mape = np.abs(target - current) / np.maximum(np.abs(target), epsilon)
+        return float(np.mean(mape))
+    
+    def prepare_rebalance_positions(
+        self,
+        raw_positions: pd.DataFrame,
+        target_weights: pd.Series,
+        additional_info: pd.DataFrame = None
+    ) -> pd.DataFrame:
+        """
+        Prepare positions data for rebalancing by adding target weights and calculating differences.
+        
+        Args:
+            raw_positions: DataFrame with raw position data
+            target_weights: Series with target weights
+            additional_info: DataFrame with additional information like lot sizes and tickers
+            
+        Returns:
+            DataFrame with prepared positions
+        """
+        if additional_info is None:
+            additional_info = pd.DataFrame()
+            
+        # Set index to figi or ticker
+        if 'figi' in raw_positions.columns:
+            positions = raw_positions.set_index('figi')
+        elif 'ticker' in raw_positions.columns:
+            positions = raw_positions.set_index('ticker')
+        else:
+            positions = raw_positions.copy()
+            
+        # Combine indices from positions and target weights
+        index = positions.index.union(target_weights.index)
+        
+        # Ensure necessary columns
+        for col in ['lot', 'ticker', 'current_price']:
+            if col not in positions.columns:
+                positions[col] = np.nan
+        
+        # Add cash as a special position if needed
+        if 'USD000UTSTOM' not in index and 'RUB000UTSTOM' not in index:
+            # Add a placeholder for cash
+            cash_symbol = 'RUB000UTSTOM'  # or 'USD000UTSTOM' for USD
+            if cash_symbol not in positions.index:
+                positions.loc[cash_symbol, 'current_price'] = 1.0
+                index = index.append(pd.Index([cash_symbol]))
+                
+        # Fill in data from additional_info and defaults
+        positions = positions.reindex(index).fillna(additional_info).fillna(0)
+        
+        # Calculate market value
+        if 'market_value' not in positions.columns:
+            positions['market_value'] = positions['quantity'] * positions['current_price']
+        
+        # Calculate current weights
+        total_value = positions['market_value'].sum()
+        if total_value > 0:
+            positions['weight'] = positions['market_value'] / total_value
+        else:
+            positions['weight'] = 0
+            
+        # Add target weights
+        positions['target_weight'] = target_weights.reindex(index).fillna(0)
+        
+        # Calculate differences
+        positions['delta_weight'] = positions['target_weight'] - positions['weight']
+        positions['target_market_value'] = positions['target_weight'] * total_value
+        positions['delta_market_value'] = positions['target_market_value'] - positions['market_value']
+        
+        # Remove cash from trading calculations
+        for cash_sym in ['USD000UTSTOM', 'RUB000UTSTOM']:
+            if cash_sym in positions.index:
+                positions = positions.drop(index=[cash_sym])
+                
+        # Calculate order quantities in lots
+        positions['delta_quantity_for_order'] = (
+            positions['delta_market_value'] / positions['current_price'] / positions['lot']
+        ).astype(int)
+        
+        # Filter out positions that don't need rebalancing
+        positions = positions[positions['delta_quantity_for_order'] != 0].sort_values('delta_market_value')
+        
+        return positions
+    
+    def execute_rebalance(
+        self,
+        orders: pd.DataFrame,
+        execute_order_function: Callable = None,
+        dry_run: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Execute rebalance orders.
+        
+        Args:
+            orders: DataFrame with orders from calculate_rebalance_orders
+            execute_order_function: Function to execute orders (receives symbol, quantity, is_buy)
+            dry_run: If True, only simulate execution
+            
+        Returns:
+            Dictionary with execution results
+        """
+        if execute_order_function is None or dry_run:
+            logger.info("Dry run mode - not executing orders")
+            return {
+                "executed": [],
+                "skipped": list(orders.index),
+                "total_value": orders['order_value'].sum(),
+                "dry_run": True
+            }
+            
+        executed = []
+        skipped = []
+        total_executed_value = 0
+        
+        for symbol, order in orders.iterrows():
+            try:
+                quantity = abs(int(order['order_quantity']))
+                is_buy = order['is_buy']
+                
+                if quantity == 0:
+                    continue
+                    
+                logger.info(f"Executing {'BUY' if is_buy else 'SELL'} order for {symbol}: {quantity} units")
+                
+                # Execute the order using the provided function
+                result = execute_order_function(
+                    symbol=symbol,
+                    quantity=quantity,
+                    is_buy=is_buy
+                )
+                
+                executed.append({
+                    "symbol": symbol,
+                    "quantity": quantity,
+                    "is_buy": is_buy,
+                    "value": order['order_value'],
+                    "result": result
+                })
+                
+                total_executed_value += abs(order['order_value'])
+                
+            except Exception as e:
+                logger.error(f"Error executing order for {symbol}: {e}")
+                skipped.append(symbol)
+                
+        logger.info(f"Executed {len(executed)} orders worth {total_executed_value:.2f}")
+        logger.info(f"Skipped {len(skipped)} orders")
+        
+        return {
+            "executed": executed,
+            "skipped": skipped,
+            "total_value": total_executed_value,
+            "dry_run": False
+        } 

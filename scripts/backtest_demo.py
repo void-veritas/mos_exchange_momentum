@@ -35,7 +35,7 @@ async def run_backtest_demo():
     price_repo = PriceRepository()
     # Initialize data sources
     data_sources = [YahooFinanceDataSource(), MOEXDataSource()]
-    price_service = PriceService(price_repo, data_sources)
+    price_service = PriceService(repository=price_repo, data_sources=data_sources)
     
     # Try to load price data, or create sample data if not available
     try:
@@ -83,6 +83,19 @@ async def run_backtest_demo():
             "selector": Portfolio(factors, select_by="optimize", select_metric="momentum"),
             "allocation": "optimize",
             "target_metric": "variance"
+        },
+        "Optimize Momentum + Inverse Volatility": {
+            "selector": Portfolio(factors, select_by="optimize", select_metric="momentum"),
+            "allocation": "inverse_vol"
+        },
+        "Optimize Sharpe + Inverse CVaR": {
+            "selector": Portfolio(factors, select_by="optimize", select_metric="sharpe"),
+            "allocation": "cvar"
+        },
+        "Optimize CVaR + Max CVaR Ratio": {
+            "selector": Portfolio(factors, select_by="optimize", select_metric="cvar"),
+            "allocation": "optimize",
+            "target_metric": "cvar_ratio"
         }
     }
     
