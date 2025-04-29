@@ -33,6 +33,10 @@ data/
 *.json
 *.png
 
+# But allow files in results directory
+!results/
+!results/**/*
+
 # Environment
 .env
 .venv
