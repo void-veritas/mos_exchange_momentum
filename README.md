@@ -1,59 +1,81 @@
-# Moscow Exchange Data API
+# Moscow Exchange Momentum Strategy
 
-A Python application for retrieving stock data from the Moscow Exchange and various other sources.
+Торговая система для анализа российского фондового рынка и тестирования инвестиционных стратегий на Московской бирже.
 
-## Project Overview
+## Описание проекта
 
-This project provides tools for fetching, storing, and analyzing stock data from multiple sources including:
+Проект представляет собой платформу для:
+- Анализа акций и индексов Московской биржи
+- Тестирования различных стратегий выбора активов и аллокации
+- Оценки производительности стратегий с учетом комиссий и затрат
+- Визуализации результатов и формирования отчетов
 
-- Moscow Exchange (MOEX)
-- Yahoo Finance
-- Tinkoff API
-- Financial Modeling Prep (FMP)
-- Finam
-- Investing.com
+## Основные компоненты
 
-## Features
+- **Price Service**: сервис для получения и работы с ценовыми данными
+- **Portfolio**: класс для управления портфелем и тестирования различных стратегий
+- **Corporate Event Fetcher**: модуль для получения информации о корпоративных событиях
+- **Data Sources**: адаптеры для различных источников данных (MOEX API, Yahoo Finance и др.)
 
-- Fetch current MOEX index constituents
-- Track changes in index composition over time
-- Retrieve historical price data from multiple sources
-- Store data in MongoDB or CSV files
-- Analyze price movements and index changes
-- Run backtests for portfolio strategies and asset selection
-- Track corporate events (dividends, splits, mergers) and adjust prices
-- Implement smart beta strategies with various optimization metrics
+## Стратегии
 
-## Smart Beta Strategy Implementation
+Реализованы различные стратегии выбора активов:
+- Секторальная ротация с равновзвешенной аллокацией
+- Оптимизация по коэффициенту Шарпа
+- Оптимизация по моментуму
+- Оптимизация по волатильности
+- Стратегии с минимизацией CVaR
 
-The project includes a complete implementation of a smart beta strategy in `scripts/smart_beta_strategy.py`, which:
+## Примеры визуализаций
 
-- Uses stocks from the MOEX index
-- Applies asset selection based on Sharpe ratio optimization
-- Performs monthly rebalancing
-- Accounts for transaction costs (0.1% per transaction)
-- Calculates comprehensive performance metrics
-- Compares results against an equally-weighted buy-and-hold strategy
-- Exports results to Excel and generates visualization graphs
+### Сравнение стратегий
 
-The strategy includes:
-- Factor-based asset selection
-- Portfolio optimization for maximum Sharpe ratio
-- Transaction cost modeling
-- Performance metrics calculation (returns, volatility, Sharpe/Sortino ratios, drawdowns)
-- Detailed portfolio weight tracking over time
+![Сравнение стратегий](results/backtest_results.png)
 
-To run the smart beta strategy backtest:
+### Анализ просадок
+
+![Анализ просадок](results/visualizations/drawdowns.png)
+
+### Распределение доходностей
+
+![Распределение доходностей](results/visualizations/return_distribution.png)
+
+### Тепловая карта результатов
+
+![Тепловая карта результатов](results/visualizations/performance_heatmap.png)
+
+### Веса в портфеле
+
+![Веса в портфеле](results/visualizations/weights_Optimize_Sharpe.png)
+
+## Как использовать
+
+### Установка зависимостей
+
+```bash
+pip install -r requirements.txt
+```
+
+### Запуск бэктеста
+
+```bash
+python scripts/backtest_demo.py
+```
+
+### Запуск Smart Beta стратегии
 
 ```bash
 python scripts/smart_beta_strategy.py
 ```
 
-Results will be saved to the `results/` directory with visualizations and an Excel file containing detailed analytics.
+## Отчеты
 
-## Project Structure
+Система генерирует несколько типов отчетов:
+- **Excel-отчеты**: детальные данные о производительности стратегий
+- **HTML-отчеты**: интерактивные отчеты с визуализациями
+- **Логи**: подробная информация о ходе выполнения операций
 
-The project follows a clean architecture approach with the following structure:
+## Структура проекта
 
 ```
 mos_exchange/
