@@ -129,9 +129,30 @@ async def run_backtest_demo():
     
     logger.info("Running backtests for different strategies")
     
-    # Define the backtest period
+    # Define the backtest periods and parameters
     lookback = 252  # Use 1 year of data for selection
+    cooling_period = 21  # Cooling period between training and testing (1 month)
     rebalance_freq = 21  # Monthly rebalancing (21 trading days)
+    
+    # Calculate approximate dates for reporting
+    if len(prices) > 0:
+        total_days = len(prices)
+        train_start_idx = 0
+        train_end_idx = int(total_days * 0.6)  # Use 60% for training
+        cooling_end_idx = train_end_idx + cooling_period
+        test_end_idx = total_days
+
+        logger.info(f"Data split: Training ({prices.index[train_start_idx].date()} to "
+                   f"{prices.index[train_end_idx-1].date()}), "
+                   f"Cooling period ({prices.index[train_end_idx].date()} to "
+                   f"{prices.index[cooling_end_idx-1].date() if cooling_end_idx < len(prices) else prices.index[-1].date()}), "
+                   f"Testing ({prices.index[cooling_end_idx].date() if cooling_end_idx < len(prices) else 'N/A'} to "
+                   f"{prices.index[test_end_idx-1].date() if test_end_idx < len(prices) else prices.index[-1].date()})")
+    
+    # Run in-sample backtest (training period) to set up initial strategies
+    # This is only for strategy calibration, not for performance evaluation
+    train_prices = prices.iloc[:int(len(prices) * 0.6)]
+    logger.info(f"Running in-sample backtest with {len(train_prices)} data points")
     
     for name, strategy in strategies.items():
         logger.info(f"Running backtest for strategy: {name}")
@@ -144,10 +165,13 @@ async def run_backtest_demo():
         allocation_method = strategy["allocation"]
         target_metric = strategy.get("target_metric", "variance")
         
-        # Run backtest over time
-        for i in range(lookback, len(prices), rebalance_freq):
+        # Skip points that don't have enough historical data
+        start_idx = min(lookback, len(train_prices) - 1)
+        
+        # Run in-sample backtest for strategy calibration (training)
+        for i in range(start_idx, len(train_prices), rebalance_freq):
             # Use historical data for selection and allocation
-            historical_prices = prices.iloc[i-lookback:i]
+            historical_prices = train_prices.iloc[max(0, i-lookback):i]
             
             # Select assets
             selected_assets = selector.select(historical_prices)
@@ -160,59 +184,237 @@ async def run_backtest_demo():
                 target_metric=target_metric
             )
             
-            # Store weights
+            # Store weights from training (for reference only)
             strategy_weights.append({
-                'date': prices.index[i],
-                'weights': weights.to_dict()
+                'date': train_prices.index[i],
+                'weights': weights.to_dict(),
+                'period': 'training'
+            })
+    
+    # Now run out-of-sample backtest (testing period) for performance evaluation
+    # Skip the cooling period to prevent information leakage
+    test_start_idx = int(len(prices) * 0.6) + cooling_period
+    test_prices = prices.iloc[test_start_idx:]
+    
+    logger.info(f"Running out-of-sample backtest with {len(test_prices)} data points "
+               f"after {cooling_period} days cooling period")
+    
+    # Check if we have enough data for testing
+    if len(test_prices) <= lookback:
+        logger.warning(f"Not enough testing data ({len(test_prices)} points) after cooling period. "
+                      f"Need at least {lookback + 1} points for testing.")
+        logger.info("Adjusting train-test split to ensure sufficient testing data")
+        
+        # Adjust the split to ensure we have enough testing data
+        min_test_size = lookback + rebalance_freq * 2  # Enough for at least 2 rebalancing periods
+        total_size = len(prices)
+        
+        if total_size < min_test_size + cooling_period + min_test_size:
+            logger.warning("Dataset too small for proper train-test split with cooling period")
+            
+            # Use simpler approach: 80% train, 20% test without cooling
+            test_start_idx = int(total_size * 0.8)
+            test_prices = prices.iloc[test_start_idx:]
+            
+            # Adaptively reduce lookback period if the test dataset is still too small
+            if len(test_prices) <= lookback:
+                original_lookback = lookback
+                # Reduce lookback to at most 75% of test data, but not less than 30 days
+                lookback = max(min(int(len(test_prices) * 0.75), original_lookback), 30)
+                logger.warning(f"Adaptively reducing lookback period from {original_lookback} to {lookback} days")
+            
+            logger.info(f"Using simplified split: training ({prices.index[0].date()} to "
+                       f"{prices.index[test_start_idx-1].date()}), "
+                       f"testing ({prices.index[test_start_idx].date()} to {prices.index[-1].date()})")
+        else:
+            # Adjust split to ensure minimum test size
+            test_portion = (min_test_size + cooling_period) / total_size
+            train_portion = 1 - test_portion
+            
+            test_start_idx = int(total_size * train_portion) + cooling_period
+            test_prices = prices.iloc[test_start_idx:]
+            
+            # Adaptively reduce lookback period if the test dataset is still too small
+            if len(test_prices) <= lookback:
+                original_lookback = lookback
+                # Reduce lookback to at most 75% of test data, but not less than 30 days
+                lookback = max(min(int(len(test_prices) * 0.75), original_lookback), 30)
+                logger.warning(f"Adaptively reducing lookback period from {original_lookback} to {lookback} days")
+            
+            logger.info(f"Adjusted split: training ({prices.index[0].date()} to "
+                       f"{prices.index[int(total_size * train_portion)-1].date()}), "
+                       f"cooling ({prices.index[int(total_size * train_portion)].date()} to "
+                       f"{prices.index[test_start_idx-1].date()}), "
+                       f"testing ({prices.index[test_start_idx].date()} to {prices.index[-1].date()})")
+    
+    for name, strategy in strategies.items():
+        logger.info(f"Testing strategy: {name}")
+        
+        portfolio_returns = []
+        portfolio_dates = []  # Track dates for each return
+        
+        # Setup portfolio
+        selector = strategy["selector"]
+        allocation_method = strategy["allocation"]
+        target_metric = strategy.get("target_metric", "variance")
+        
+        # Skip points that don't have enough historical data
+        start_idx = min(lookback, len(test_prices) - 1)
+        
+        # Check if we can run at least one test
+        if start_idx >= len(test_prices) - 1:
+            logger.warning(f"Test dataset too small for strategy: {name}. Skipping.")
+            continue
+        
+        # Calculate rebalancing dates to ensure consistent frequency
+        # First rebalancing date is after we have enough historical data
+        first_rebalance_date = test_prices.index[start_idx]
+        
+        # Generate all subsequent rebalancing dates at exact intervals
+        rebalance_dates = []
+        current_date = first_rebalance_date
+        while current_date <= test_prices.index[-1]:
+            rebalance_dates.append(current_date)
+            # Find the date that's exactly rebalance_freq days later (or closest available)
+            target_date = current_date + pd.Timedelta(days=rebalance_freq)
+            # Find the closest available date in our dataset
+            if target_date > test_prices.index[-1]:
+                break
+            date_idx = test_prices.index.searchsorted(target_date)
+            if date_idx >= len(test_prices.index):
+                break
+            current_date = test_prices.index[date_idx]
+        
+        logger.info(f"Strategy {name}: Scheduled {len(rebalance_dates)} rebalancing events")
+            
+        # Run out-of-sample backtest for performance evaluation (testing)
+        last_weights = None
+        for rebalance_date in rebalance_dates:
+            # Find the index of this rebalance date
+            date_idx = test_prices.index.get_loc(rebalance_date)
+            
+            # Get historical data up to this rebalance date
+            current_date_idx = test_start_idx + date_idx
+            historical_prices = prices.iloc[max(0, current_date_idx-lookback):current_date_idx]
+            
+            # Check if we have enough historical data
+            if len(historical_prices) < min(30, lookback / 2):  # At least 30 days or half the lookback
+                logger.warning(f"Insufficient historical data at {rebalance_date} for {name}. Using previous weights.")
+                if last_weights is None:
+                    # If no previous weights, use equal weights
+                    selected_assets = list(test_prices.columns[:min(5, len(test_prices.columns))])
+                    weights = pd.Series({asset: 1.0 / len(selected_assets) for asset in selected_assets})
+                else:
+                    # Keep using previous weights
+                    weights = last_weights
+            else:
+                # Select assets
+                selected_assets = selector.select(historical_prices)
+                
+                # Allocate weights
+                weights = selector.allocate(
+                    historical_prices, 
+                    selected_assets, 
+                    method=allocation_method,
+                    target_metric=target_metric
+                )
+            
+            # Store current weights for next iteration
+            last_weights = weights
+            
+            # Store weights from testing
+            strategy_weights.append({
+                'date': rebalance_date,
+                'weights': weights.to_dict(),
+                'period': 'testing'
             })
             
-            # Calculate forward returns
-            if i + rebalance_freq <= len(prices):
-                forward_prices = prices.iloc[i:i+rebalance_freq]
-                forward_returns = forward_prices.pct_change().fillna(0)
-                
-                # Calculate portfolio return
-                daily_returns = []
-                for day in range(len(forward_returns)):
-                    # Get daily return for portfolio
+            # Calculate forward returns until next rebalancing
+            next_idx = date_idx + 1
+            while next_idx < len(test_prices.index):
+                if next_idx >= len(test_prices.index) or (len(rebalance_dates) > rebalance_dates.index(rebalance_date) + 1 and 
+                                                   test_prices.index[next_idx] >= rebalance_dates[rebalance_dates.index(rebalance_date) + 1]):
+                    break
+                    
+                # Calculate daily return
+                if next_idx > 0:  # Skip first day as we can't calculate return
                     day_return = 0
                     for asset, weight in weights.items():
-                        if asset in forward_returns.columns:
-                            day_return += weight * forward_returns.iloc[day][asset]
-                    daily_returns.append(day_return)
+                        if asset in test_prices.columns:
+                            # Calculate daily return for this asset
+                            asset_return = (test_prices[asset].iloc[next_idx] / test_prices[asset].iloc[next_idx-1]) - 1
+                            day_return += weight * asset_return
+                    
+                    # Store the return and its date
+                    portfolio_returns.append(day_return)
+                    portfolio_dates.append(test_prices.index[next_idx])
                 
-                portfolio_returns.extend(daily_returns)
+                next_idx += 1
         
-        # Store results
-        results[name] = portfolio_returns
+        # Create a complete series with all dates in test period
+        full_returns = pd.Series(0.0, index=test_prices.index)
+        
+        # Fill in our actual returns at the corresponding dates
+        for date, ret in zip(portfolio_dates, portfolio_returns):
+            full_returns[date] = ret
+        
+        # Store results (only from testing period)
+        results[name] = full_returns.tolist()
         weights_history[name] = strategy_weights
     
-    # Calculate performance metrics
-    performance = calculate_portfolio_performance(results, prices.index[lookback:])
+    # Check if we have any results from testing period
+    if all(len(returns) == 0 for returns in results.values()):
+        logger.warning("No results generated from testing period. Test dataset may be too small.")
+        # Create empty performance dataframe with the right index
+        if len(test_prices) > 0:
+            performance = pd.DataFrame(index=test_prices.index)
+        else:
+            performance = pd.DataFrame()
+    else:
+        # Create a complete series of dates for the testing period
+        # This ensures we have a continuous time series even if strategies skip some days
+        all_test_dates = test_prices.index
+        
+        # Calculate performance metrics (only on testing data)
+        performance = calculate_portfolio_performance(results, all_test_dates)
     
-    # Calculate daily returns for each strategy
+    # Calculate daily returns for each strategy with proper date alignment
     daily_returns = {}
+    
     for strategy, returns in results.items():
-        # Ensure returns matches the date range
-        strategy_returns = returns[:len(prices.index[lookback:])]
-        # Convert returns to Series
-        daily_returns[strategy] = pd.Series(strategy_returns, index=prices.index[lookback:][:len(strategy_returns)])
+        if returns:  # Check if returns list is not empty
+            # Create properly aligned series
+            daily_returns[strategy] = pd.Series(returns, index=test_prices.index)
+        else:
+            # Create empty series with the right index
+            daily_returns[strategy] = pd.Series(index=test_prices.index)
+    
+    # Log summary statistics for verification
+    logger.info("Performance summary:")
+    for strategy in results.keys():
+        if not performance.empty and strategy in performance.columns:
+            final_return = performance[strategy].iloc[-1] * 100 if len(performance) > 0 else 0
+            logger.info(f"  {strategy}: {final_return:.2f}% return, "
+                       f"{len([r for r in results[strategy] if r != 0])} active trading days")
     
     # Plot basic and extended visualizations
-    plot_backtest_results(performance, "Backtest Results")
-    plot_extended_visualizations(
-        performance=performance, 
-        daily_returns=daily_returns,
-        weights_history=weights_history,
-        lookback=lookback,
-        rebalance_freq=rebalance_freq
-    )
+    if not performance.empty:
+        plot_backtest_results(performance, "Out-of-Sample Backtest Results")
+        plot_extended_visualizations(
+            performance=performance, 
+            daily_returns=daily_returns,
+            weights_history=weights_history,
+            lookback=lookback,
+            rebalance_freq=rebalance_freq
+        )
+        
+        # Export to Excel and HTML report
+        export_to_excel(prices, factors, results, performance, weights_history)
+        create_html_report(performance, daily_returns, weights_history)
+    else:
+        logger.warning("No performance data generated. Skipping visualizations and reports.")
     
-    # Export to Excel and HTML report
-    export_to_excel(prices, factors, results, performance, weights_history)
-    create_html_report(performance, daily_returns, weights_history)
-    
-    logger.info("Backtest demonstration completed successfully")
+    logger.info("Backtest demonstration completed")
     
     return performance
 
@@ -303,14 +505,26 @@ def calculate_portfolio_performance(
     Returns:
         DataFrame with performance metrics
     """
-    performance = pd.DataFrame()
+    performance = pd.DataFrame(index=dates)
     
     for strategy, returns in results.items():
-        # Ensure returns matches the date range
+        # Handle case where returns might be shorter than dates
         strategy_returns = returns[:len(dates)]
+        
+        # Ensure we have a return for each date by padding with zeros if needed
+        if len(strategy_returns) < len(dates):
+            logger.warning(f"Strategy {strategy} has {len(strategy_returns)} returns but expected {len(dates)}. "
+                           f"Padding with zeros.")
+            # Pad with zeros to match length
+            strategy_returns.extend([0.0] * (len(dates) - len(strategy_returns)))
         
         # Convert returns to Series
         returns_series = pd.Series(strategy_returns, index=dates[:len(strategy_returns)])
+        
+        # Fill any missing dates with zero returns to avoid discontinuities
+        if returns_series.isna().any():
+            logger.warning(f"Strategy {strategy} has {returns_series.isna().sum()} missing values. Filling with zeros.")
+            returns_series = returns_series.fillna(0)
         
         # Calculate cumulative returns
         cumulative_returns = (1 + returns_series).cumprod() - 1
@@ -361,7 +575,10 @@ def plot_extended_visualizations(
         lookback: Lookback period for asset selection
         rebalance_freq: Rebalancing frequency in days
     """
-    logger.info("Creating extended visualizations")
+    # Check if performance data is empty
+    if performance.empty or len(performance) == 0:
+        logger.warning("Performance data is empty, skipping extended visualizations")
+        return
     
     # Set up the visualization style
     sns.set(style="whitegrid")
@@ -440,177 +657,237 @@ def plot_extended_visualizations(
     # Calculate key metrics for each strategy
     metrics = pd.DataFrame(index=performance.columns)
     
-    # Total return
-    metrics['Total Return (%)'] = performance.iloc[-1] * 100
-    
-    # Annualized return
-    days = len(performance)
-    years = days / 252
-    metrics['Annualized Return (%)'] = ((1 + performance.iloc[-1]) ** (1 / years) - 1) * 100
-    
-    # Annualized volatility
-    metrics['Annualized Volatility (%)'] = [daily_returns[s].std() * np.sqrt(252) * 100 for s in performance.columns]
-    
-    # Sharpe ratio
-    metrics['Sharpe Ratio'] = metrics['Annualized Return (%)'] / metrics['Annualized Volatility (%)']
-    
-    # Maximum drawdown
-    metrics['Maximum Drawdown (%)'] = [calculate_max_drawdown(performance[s]) * 100 for s in performance.columns]
-    
-    # Calmar ratio
-    metrics['Calmar Ratio'] = -metrics['Annualized Return (%)'] / metrics['Maximum Drawdown (%)']
-    
-    # Sortino ratio (downside deviation)
-    sortino_values = []
-    for strategy in performance.columns:
-        neg_returns = daily_returns[strategy].copy()
-        neg_returns[neg_returns > 0] = 0
-        downside_dev = neg_returns.std() * np.sqrt(252)
-        sortino = metrics.loc[strategy, 'Annualized Return (%)'] / 100 / downside_dev if downside_dev > 0 else 0
-        sortino_values.append(sortino)
-    metrics['Sortino Ratio'] = sortino_values
-    
-    # Plot heatmap of metrics
-    plt.figure(figsize=(16, 10))
-    metrics_heatmap = metrics.copy()
-    
-    # Standardize values for better visualization
-    for col in metrics_heatmap.columns:
-        metrics_heatmap[col] = (metrics_heatmap[col] - metrics_heatmap[col].mean()) / metrics_heatmap[col].std()
-    
-    sns.heatmap(metrics_heatmap.T, annot=metrics.T, fmt='.2f', cmap='RdYlGn', 
-                linewidths=.5, center=0, cbar_kws={"shrink": .8})
-    
-    plt.title('Strategy Performance Metrics Comparison', fontsize=16)
-    plt.tight_layout()
-    plt.savefig("results/visualizations/performance_heatmap.png", dpi=300)
-    plt.close()
+    # Check if the performance DataFrame has data
+    if len(performance) > 0:
+        # Total return
+        metrics['Total Return (%)'] = performance.iloc[-1] * 100
+        
+        # Annualized return
+        days = len(performance)
+        years = days / 252
+        metrics['Annualized Return (%)'] = ((1 + performance.iloc[-1]) ** (1 / years) - 1) * 100
+        
+        # Annualized volatility
+        metrics['Annualized Volatility (%)'] = [daily_returns[s].std() * np.sqrt(252) * 100 for s in performance.columns]
+        
+        # Sharpe ratio
+        metrics['Sharpe Ratio'] = metrics['Annualized Return (%)'] / metrics['Annualized Volatility (%)']
+        
+        # Maximum drawdown
+        metrics['Maximum Drawdown (%)'] = [calculate_max_drawdown(performance[s]) * 100 for s in performance.columns]
+        
+        # Calmar ratio
+        metrics['Calmar Ratio'] = -metrics['Annualized Return (%)'] / metrics['Maximum Drawdown (%)']
+        
+        # Sortino ratio (downside deviation)
+        sortino_values = []
+        for strategy in performance.columns:
+            neg_returns = daily_returns[strategy].copy()
+            neg_returns[neg_returns > 0] = 0
+            downside_dev = neg_returns.std() * np.sqrt(252)
+            sortino = metrics.loc[strategy, 'Annualized Return (%)'] / 100 / downside_dev if downside_dev > 0 else 0
+            sortino_values.append(sortino)
+        metrics['Sortino Ratio'] = sortino_values
+        
+        # Plot heatmap of metrics
+        plt.figure(figsize=(16, 10))
+        metrics_heatmap = metrics.copy()
+        
+        # Standardize values for better visualization
+        for col in metrics_heatmap.columns:
+            metrics_heatmap[col] = (metrics_heatmap[col] - metrics_heatmap[col].mean()) / metrics_heatmap[col].std()
+        
+        sns.heatmap(metrics_heatmap.T, annot=metrics.T, fmt='.2f', cmap='RdYlGn', 
+                    linewidths=.5, center=0, cbar_kws={"shrink": .8})
+        
+        plt.title('Strategy Performance Metrics Comparison', fontsize=16)
+        plt.tight_layout()
+        plt.savefig("results/visualizations/performance_heatmap.png", dpi=300)
+        plt.close()
+    else:
+        logger.warning("Not enough performance data to calculate metrics")
     
     # 6. Weight allocation visualization for each strategy (top strategies)
-    top_strategies = metrics.sort_values('Sharpe Ratio', ascending=False).head(3).index
-    
-    for strategy in top_strategies:
-        plt.figure(figsize=(14, 8))
+    # Only proceed if we have performance data and metrics calculated
+    if not metrics.empty and 'Sharpe Ratio' in metrics.columns:
+        top_strategies = metrics.sort_values('Sharpe Ratio', ascending=False).head(3).index
         
-        # Convert weights to DataFrame
-        weights_df = pd.DataFrame()
-        for period in weights_history[strategy]:
-            date = period['date']
-            weights = period['weights']
-            weights_series = pd.Series(weights, name=date)
-            weights_df = pd.concat([weights_df, weights_series.to_frame().T])
-        
-        # Select top assets by average weight
-        if not weights_df.empty:
-            top_assets = weights_df.mean().nlargest(8).index
-            weights_df_top = weights_df[top_assets]
+        for strategy in top_strategies:
+            # Create a new figure
+            plt.figure(figsize=(14, 8))
             
-            # Plot as area chart
-            ax = weights_df_top.plot(kind='area', stacked=True, colormap='viridis', alpha=0.7)
+            # Collect weights data for testing period
+            strategy_weights = []
+            strategy_dates = []
             
+            for period in weights_history[strategy]:
+                if period['period'] == 'testing':  # Only use testing period weights
+                    strategy_weights.append(period['weights'])
+                    strategy_dates.append(period['date'])
+            
+            # Skip if we don't have enough data
+            if len(strategy_weights) < 2:
+                logger.warning(f"Not enough rebalancing events for strategy {strategy}, skipping visualization")
+                continue
+                
+            # Get last date from performance dataframe for visualization end
+            last_date = performance.index[-1]
+            
+            # Select top assets (limit to 8 for readability)
+            all_assets = set()
+            for w in strategy_weights:
+                all_assets.update(w.keys())
+            
+            # Calculate average weight for each asset
+            avg_weights = {}
+            for asset in all_assets:
+                weights = [w.get(asset, 0) for w in strategy_weights]
+                avg_weights[asset] = sum(weights) / len(weights)
+            
+            # Select top assets
+            top_assets = sorted(avg_weights.keys(), key=lambda k: avg_weights[k], reverse=True)[:8]
+            
+            # Create basic step plots for each asset
+            bottom = np.zeros(len(strategy_dates) + 1)  # +1 for the last point
+            
+            # Add final date for complete visualization
+            plot_dates = strategy_dates + [last_date]
+            
+            # Use viridis colormap
+            colors = plt.cm.viridis(np.linspace(0, 1, len(top_assets)))
+            
+            for i, asset in enumerate(top_assets):
+                # Get weights for this asset at each rebalancing date
+                asset_weights = [w.get(asset, 0) for w in strategy_weights]
+                
+                # Add the last weight again for step visualization
+                asset_weights.append(asset_weights[-1])
+                
+                # Plot as a step function
+                plt.fill_between(
+                    plot_dates,
+                    bottom,
+                    bottom + asset_weights, 
+                    step='post',  # Use post-step for accurate visualization
+                    alpha=0.7,
+                    label=asset,
+                    color=colors[i]
+                )
+                
+                # Update bottom for stacking
+                bottom = bottom + asset_weights
+            
+            # Add labels and title
             plt.title(f'Weight Allocation Over Time - {strategy}', fontsize=16)
             plt.xlabel('Date', fontsize=12)
             plt.ylabel('Weight', fontsize=12)
+            plt.ylim(0, 1.05)  # Set y-axis limits
             plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
             plt.grid(True, alpha=0.3)
             
-            # Mark rebalancing dates
-            rebalance_dates = weights_df.index
-            for date in rebalance_dates:
-                plt.axvline(x=date, color='red', linestyle='--', alpha=0.3)
+            # Mark rebalancing dates with vertical lines
+            for date in strategy_dates:
+                plt.axvline(x=date, color='red', linestyle='--', alpha=0.7, linewidth=1.5)
             
             plt.tight_layout()
             plt.savefig(f"results/visualizations/weights_{strategy.replace(' ', '_')[:15]}.png", dpi=300)
             plt.close()
+    else:
+        logger.warning("Skipping weight allocation visualization due to insufficient performance data")
     
     # 7. Cumulative returns with rebalancing points
-    plt.figure(figsize=(14, 8))
-    
-    # Plot cumulative returns
-    for strategy in performance.columns:
-        plt.plot(performance.index, performance[strategy] * 100, label=strategy, linewidth=2)
-    
-    # Mark rebalancing dates for the first strategy (they are the same for all)
-    if weights_history and weights_history[list(weights_history.keys())[0]]:
-        rebalance_dates = [period['date'] for period in weights_history[list(weights_history.keys())[0]]]
-        for date in rebalance_dates:
-            plt.axvline(x=date, color='gray', linestyle='--', alpha=0.5)
-    
-    plt.title('Cumulative Returns with Rebalancing Points', fontsize=16)
-    plt.xlabel('Date', fontsize=12)
-    plt.ylabel('Cumulative Return (%)', fontsize=12)
-    plt.legend(loc='best')
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig("results/visualizations/returns_with_rebalancing.png", dpi=300)
-    plt.close()
-    
-    # 8. Monthly returns heatmap for the best strategy
-    best_strategy = metrics.sort_values('Sharpe Ratio', ascending=False).index[0]
-    
-    # Create monthly returns
-    try:
-        # Try to resample to month end
-        monthly_returns = daily_returns[best_strategy].resample('M').mean() * 21 * 100  # Approximate monthly return
-        
-        # Create pivot table for heatmap
-        monthly_returns_pivot = pd.pivot_table(
-            monthly_returns.reset_index(),
-            values=0,
-            index=[monthly_returns.index.year],
-            columns=[monthly_returns.index.month],
-            aggfunc='sum'
-        )
-        monthly_returns_pivot.columns = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-        
-        plt.figure(figsize=(14, 8))
-        sns.heatmap(monthly_returns_pivot, annot=True, fmt='.1f', cmap='RdYlGn', 
-                    linewidths=.5, center=0, cbar_kws={"shrink": .8})
-        
-        plt.title(f'Monthly Returns (%) - {best_strategy}', fontsize=16)
-        plt.tight_layout()
-        plt.savefig("results/visualizations/monthly_returns_heatmap.png", dpi=300)
-        plt.close()
-    except Exception as e:
-        logger.warning(f"Could not create monthly returns heatmap: {e}")
-        
-        # Alternative visualization: returns distribution by month
+    if not performance.empty:
         plt.figure(figsize=(14, 8))
         
-        # Group returns by month
-        returns_by_month = {}
-        for i, ret in daily_returns[best_strategy].items():
-            month = i.month
-            if month not in returns_by_month:
-                returns_by_month[month] = []
-            returns_by_month[month].append(ret * 100)
+        # Plot cumulative returns
+        for strategy in performance.columns:
+            plt.plot(performance.index, performance[strategy] * 100, label=strategy, linewidth=2)
         
-        # Create boxplot
-        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-        data_to_plot = [returns_by_month.get(m+1, []) for m in range(12)]
+        # Mark rebalancing dates for the first strategy (they are the same for all)
+        if weights_history and weights_history[list(weights_history.keys())[0]]:
+            rebalance_dates = [period['date'] for period in weights_history[list(weights_history.keys())[0]]]
+            for date in rebalance_dates:
+                plt.axvline(x=date, color='gray', linestyle='--', alpha=0.5)
         
-        plt.boxplot(data_to_plot, labels=month_names)
-        plt.title(f'Daily Returns Distribution by Month - {best_strategy}', fontsize=16)
-        plt.ylabel('Daily Return (%)', fontsize=12)
+        plt.title('Cumulative Returns with Rebalancing Points', fontsize=16)
+        plt.xlabel('Date', fontsize=12)
+        plt.ylabel('Cumulative Return (%)', fontsize=12)
+        plt.legend(loc='best')
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig("results/visualizations/returns_by_month.png", dpi=300)
+        plt.savefig("results/visualizations/returns_with_rebalancing.png", dpi=300)
         plt.close()
     
-    # Create combined plot of top 3 strategies
-    plt.figure(figsize=(14, 8))
-    
-    for strategy in top_strategies:
-        plt.plot(performance.index, performance[strategy] * 100, label=strategy, linewidth=2)
-    
-    plt.title('Top 3 Strategies by Sharpe Ratio', fontsize=16)
-    plt.xlabel('Date', fontsize=12)
-    plt.ylabel('Cumulative Return (%)', fontsize=12)
-    plt.legend(loc='best')
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig("results/visualizations/top_strategies.png", dpi=300)
-    plt.close()
+    # 8. Monthly returns heatmap for the best strategy
+    # Only proceed if we have performance data and metrics calculated
+    if not metrics.empty and 'Sharpe Ratio' in metrics.columns:
+        best_strategy = metrics.sort_values('Sharpe Ratio', ascending=False).index[0]
+        
+        # Create monthly returns
+        try:
+            # Try to resample to month end
+            monthly_returns = daily_returns[best_strategy].resample('M').mean() * 21 * 100  # Approximate monthly return
+            
+            # Create pivot table for heatmap
+            monthly_returns_pivot = pd.pivot_table(
+                monthly_returns.reset_index(),
+                values=0,
+                index=[monthly_returns.index.year],
+                columns=[monthly_returns.index.month],
+                aggfunc='sum'
+            )
+            monthly_returns_pivot.columns = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+            
+            plt.figure(figsize=(14, 8))
+            sns.heatmap(monthly_returns_pivot, annot=True, fmt='.1f', cmap='RdYlGn', 
+                        linewidths=.5, center=0, cbar_kws={"shrink": .8})
+            
+            plt.title(f'Monthly Returns (%) - {best_strategy}', fontsize=16)
+            plt.tight_layout()
+            plt.savefig("results/visualizations/monthly_returns_heatmap.png", dpi=300)
+            plt.close()
+        except Exception as e:
+            logger.warning(f"Could not create monthly returns heatmap: {e}")
+            
+            # Alternative visualization: returns distribution by month
+            plt.figure(figsize=(14, 8))
+            
+            # Group returns by month
+            returns_by_month = {}
+            for i, ret in daily_returns[best_strategy].items():
+                month = i.month
+                if month not in returns_by_month:
+                    returns_by_month[month] = []
+                returns_by_month[month].append(ret * 100)
+            
+            # Create boxplot
+            month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+            data_to_plot = [returns_by_month.get(m+1, []) for m in range(12)]
+            
+            plt.boxplot(data_to_plot, labels=month_names)
+            plt.title(f'Daily Returns Distribution by Month - {best_strategy}', fontsize=16)
+            plt.ylabel('Daily Return (%)', fontsize=12)
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig("results/visualizations/returns_by_month.png", dpi=300)
+            plt.close()
+        
+        # Create combined plot of top 3 strategies
+        if len(metrics) >= 3:  # Only if we have at least 3 strategies
+            plt.figure(figsize=(14, 8))
+            
+            top_strategies = metrics.sort_values('Sharpe Ratio', ascending=False).head(3).index
+            for strategy in top_strategies:
+                plt.plot(performance.index, performance[strategy] * 100, label=strategy, linewidth=2)
+            
+            plt.title('Top 3 Strategies by Sharpe Ratio', fontsize=16)
+            plt.xlabel('Date', fontsize=12)
+            plt.ylabel('Cumulative Return (%)', fontsize=12)
+            plt.legend(loc='best')
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig("results/visualizations/top_strategies.png", dpi=300)
+            plt.close()
     
     logger.info(f"Extended visualizations saved to results/visualizations/")
 
@@ -653,6 +930,11 @@ def export_to_excel(
         performance: DataFrame with strategy performance
         weights_history: Dictionary with portfolio weights over time
     """
+    # Check if performance data is empty
+    if performance.empty:
+        logger.warning("Performance data is empty, skipping Excel export")
+        return
+        
     # Create Excel writer
     os.makedirs("results", exist_ok=True)
     writer = pd.ExcelWriter("results/backtest_results.xlsx", engine="xlsxwriter")
@@ -689,27 +971,31 @@ def export_to_excel(
     # Write summary statistics
     summary = pd.DataFrame(index=performance.columns)
     
-    # Calculate annualized return
-    days = len(performance)
-    years = days / 252
-    summary["Annualized Return (%)"] = ((1 + performance.iloc[-1]) ** (1 / years) - 1) * 100
-    
-    # Calculate volatility
-    returns = performance.pct_change().dropna()
-    summary["Annualized Volatility (%)"] = returns.std() * np.sqrt(252) * 100
-    
-    # Calculate Sharpe ratio
-    summary["Sharpe Ratio"] = summary["Annualized Return (%)"] / summary["Annualized Volatility (%)"]
-    
-    # Calculate maximum drawdown
-    for strategy in performance.columns:
-        cumulative = 1 + performance[strategy]
-        running_max = cumulative.cummax()
-        drawdown = (cumulative / running_max) - 1
-        summary.loc[strategy, "Maximum Drawdown (%)"] = drawdown.min() * 100
-    
-    # Calculate Calmar ratio
-    summary["Calmar Ratio"] = -summary["Annualized Return (%)"] / summary["Maximum Drawdown (%)"]
+    # Check if we have enough data for statistics
+    if len(performance) > 0:
+        # Calculate annualized return
+        days = len(performance)
+        years = days / 252
+        summary["Annualized Return (%)"] = ((1 + performance.iloc[-1]) ** (1 / years) - 1) * 100
+        
+        # Calculate volatility
+        returns = performance.pct_change().dropna()
+        summary["Annualized Volatility (%)"] = returns.std() * np.sqrt(252) * 100
+        
+        # Calculate Sharpe ratio
+        summary["Sharpe Ratio"] = summary["Annualized Return (%)"] / summary["Annualized Volatility (%)"]
+        
+        # Calculate maximum drawdown
+        for strategy in performance.columns:
+            cumulative = 1 + performance[strategy]
+            running_max = cumulative.cummax()
+            drawdown = (cumulative / running_max) - 1
+            summary.loc[strategy, "Maximum Drawdown (%)"] = drawdown.min() * 100
+        
+        # Calculate Calmar ratio
+        summary["Calmar Ratio"] = -summary["Annualized Return (%)"] / summary["Maximum Drawdown (%)"]
+    else:
+        logger.warning("Not enough performance data to calculate summary statistics")
     
     # Write to Excel
     summary.to_excel(writer, sheet_name="Summary")
@@ -732,6 +1018,11 @@ def create_html_report(
         daily_returns: Dictionary mapping strategy names to daily return series
         weights_history: Dictionary mapping strategy names to weights history
     """
+    # Check if performance data is empty
+    if performance.empty or len(performance) == 0:
+        logger.warning("Performance data is empty, skipping HTML report generation")
+        return
+        
     logger.info("Creating HTML report")
     
     # Calculate metrics for the report
